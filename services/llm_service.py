@@ -4,7 +4,7 @@ from langchain_core.output_parsers import JsonOutputParser
 from pydantic import BaseModel, Field
 from langchain.prompts import ChatPromptTemplate
 from services.db_service import DBService
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Literal
 from bson import ObjectId
 from moviepy.editor import VideoFileClip, concatenate_videoclips
 from services.google_drive_service import download_from_gdrive
@@ -164,3 +164,67 @@ Please identify the most important teaching segments.""")
             print(f"Error processing transcript: {e}")
         
         return output_path
+    
+
+
+    def generate_quiz(self, module_name, article_contents: List[str], video_content: List[str]) -> str:
+        
+        # Gather content for quiz generation
+        quiz_content = ""
+        
+        # Add article content
+        for article in article_contents:
+            if article:
+                quiz_content += f"Article - {module_name}:\n{article}\n\n"
+        
+            
+        for transcript in video_content:
+            if transcript:
+                quiz_content += f"Video Content: {transcript}...\n"
+            
+            quiz_content += "\n---\n\n"
+        
+        # Generate quiz using LLM
+        quiz_prompt = ChatPromptTemplate.from_messages([
+            ("system", """You are an expert quiz creator. Create a comprehensive quiz with 5 questions 
+            based on the provided content. It should contain multiple choice questions (4 options each) along with answer"""),
+            ("human", f"Create a quiz based on this content:\n\n{quiz_content}")
+        ])
+
+        class Option(BaseModel):
+            a: str = Field("first option to question")
+            b: str = Field("Second option to question")
+            c: str = Field("Third option to question")
+            d: str = Field("Fourth option to question")
+
+        class QuizStructure(BaseModel):
+            question: str = Field(description="Question to be asked")
+            options: Option = Field(description="Options to question")
+            correct: Literal["a", "b", "c", "d"] = Field(description="COrrect option to question among a, b, c, d")
+        
+        class Quizzes(BaseModel):
+            output: List[QuizStructure] = Field(description="List of 5 quizzes")
+
+        structured_llm = self.llm.with_structured_output(Quizzes)
+        chain = quiz_prompt | structured_llm
+        quiz_data = chain.invoke({})
+        
+        return self._object_to_dict(quiz_data)
+    
+    def _object_to_dict(self, obj):
+        if not hasattr(obj, '__dict__'):
+            return obj  # Not an object with __dict__, return as is (e.g., int, str, list)
+
+        result = {}
+        for key, value in obj.__dict__.items():
+            if hasattr(value, '__dict__'):  # If the value is another object, recurse
+                result[key] = self._object_to_dict(value)
+            elif isinstance(value, list):  # Handle lists of objects
+                result[key] = [self._object_to_dict(item) for item in value]
+            else:
+                result[key] = value
+        return result
+
+
+
+
