@@ -35,7 +35,7 @@ class LLMService:
 
 
 
-    def generate_article(self, assets) -> List[str]:
+    def generate_article(self, assets) -> str:
         # assets = self._get_assets(course_id, module_id)
         
         # if not assets:
@@ -223,7 +223,86 @@ Please write a 250-word article about this module.""")
         output_path_clipped_video = self.process_video(video_assets)
         quiz = self.generate_quiz(module_name, [preview_article], [i["transcript"] for i in video_assets])
 
-        return preview_article, output_path_clipped_video, quiz
+        return {
+            "video": { "gDriveUrl": output_path_clipped_video },
+            "article": { "content": preview_article },
+            "quiz": quiz,
+        }
 
 
+    def get_top_engaging_modules(self, program_id: str) -> List[str]:
+        """
+        Fetch modules across all courses inside a program,
+        and use LLM to pick 4 optimal module IDs based on title + description.
+        """
 
+        # fetch program
+        program = self.db.find_one(self.collection_name, {"_id": ObjectId(program_id)})
+        if not program:
+            print(f"No program found with id {program_id}")
+            return []
+
+        # flatten modules across all courses
+        modules = []
+        for course in program.get("courses", []):
+            for module in course.get("module", []):
+                modules.append({
+                    "id": str(module["_id"]),
+                    "title": module.get("title", "Untitled"),
+                    "description": module.get("description", "")[:300]  # preview
+                })
+
+        if not modules:
+            print("No modules found in program.")
+            return []
+
+        # prepare modules for LLM
+        modules_text = "\n".join([
+            f"ID: {m['id']}, Title: {m['title']}, Description: {m['description']}"
+            for m in modules
+        ])
+
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", "You are a helpful AI that selects the best learning modules based on title and description."),
+            ("human", f"""
+You are an expert learning content curator.
+
+You are given a list of modules with their titles and short descriptions:
+
+{modules_text}
+
+Your task:
+1. Analyse the **topic importance** from the title and description.
+2. Prefer modules that cover **diverse topics** (avoid picking very similar ones).
+3. Select modules that would be **most attractive and useful** for learners.
+4. Return EXACTLY 4 module IDs.
+""")
+        ])
+
+        # Pydantic model for structured output
+        class ModuleSelectionOutput(BaseModel):
+            module_ids: List[str] = Field(
+                description="Exactly 4 selected module IDs that are most engaging and diverse"
+            )
+
+        structured_llm = self.llm.with_structured_output(ModuleSelectionOutput)
+        chain = prompt | structured_llm
+
+        try:
+            result: ModuleSelectionOutput = chain.invoke({})
+            return result.module_ids
+        except Exception as e:
+            print(f"Error selecting modules: {e}")
+            return []
+
+
+    def generate_preview_for_engaging_modules(self, program_id):
+        previews = []
+        model_ids = self.get_top_engaging_modules(program_id)
+        for model_id in model_ids:
+            preview = self.create_module_preview(model_id)
+            previews.append(preview)
+
+        modified_count = self.db.update_one("programs", {"_id": ObjectId(program_id)}, {"overView": previews})
+        print(modified_count)
+        return previews
