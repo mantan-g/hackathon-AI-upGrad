@@ -1,11 +1,14 @@
 import os
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.output_parsers import JsonOutputParser
+from pydantic import BaseModel, Field
 from langchain.prompts import ChatPromptTemplate
 from services.db_service import DBService
 from typing import List, Dict, Any
 from bson import ObjectId
 from moviepy.editor import VideoFileClip, concatenate_videoclips
+from services.google_drive_service import download_from_gdrive
+from services.transcription_service import fetch_and_clean_transcript
 
 class LLMService:
     def __init__(self):
@@ -17,6 +20,8 @@ class LLMService:
         )
         self.db = DBService()
         self.collection_name = "programs"
+        self.download_video_path = "./output_videos"
+        self.clipped_video_path = "./clipped_videos"
 
     def _get_assets(self, course_id, module_id):
         modules = self.db.find_one(self.collection_name, {"_id": ObjectId(course_id)})["courses"]
@@ -101,84 +106,61 @@ Here are some key aspects of NestJS:
     
 
 
-    def process_videos(self, selected_modules: List[Dict[str, Any]]) -> List[str]:
-        processed_video_paths = []
+    def process_video(self, yt_url, gdrive_url, module_name) -> List[str]:
+        print("gdrive_url", gdrive_url)
+        video_path = download_from_gdrive(gdrive_url, os.path.join(self.download_video_path, f"{module_name}.mp4"))
+        transcript = fetch_and_clean_transcript(yt_url)
+        print("transcript", transcript)
+        print("video_path", video_path)
+        if not video_path:
+            print("Video not downloaded")
+            return
+        module_clips = []
+        # Extract relevant timelines using LLM
+        # Extract relevant timelines using LLM
+        timeline_prompt = ChatPromptTemplate.from_messages([
+            ("system", """You are an expert video editor. Analyze the transcript and identify 
+the most important segment of less than 300 seconds that teach the core concepts of the module.
+
+Return a JSON array of segments with start_time, end_time (in seconds), and reason.
+Select only 1 most valuable segment that covers the module."""),
+("human", f"""Module: {module_name}
+
+Transcript: {transcript}
+
+Please identify the most important teaching segments.""")
+        ])
         
-        for module in selected_modules:
-            module_id = str(module['_id'])
-            module_title = module.get('title', 'Untitled').replace(' ', '_').replace('/', '_')
-            
-            # Find video assets for this module
-            video_assets = list(self.assets_collection.find({
-                "module_id": module_id,
-                "type": "video"
-            }))
-            
-            if not video_assets:
-                print(f"No video assets found for module {module_id}")
-                continue
-            
-            module_clips = []
-            
-            for video_asset in video_assets:
-                transcript = video_asset.get('transcript', '')
-                video_path = video_asset.get('file_path', '')
-                
-                if not transcript or not video_path:
-                    continue
-                
-                # Extract relevant timelines using LLM
-                timeline_prompt = ChatPromptTemplate.from_messages([
-                    ("system", """You are an expert video editor. Analyze the transcript and identify 
-                    the most important segment of 2-3 minutes that teach the core concepts of the module.
-                    
-                    Return a JSON array of segments with start_time, end_time (in seconds), and reason.
-                    Select only 1 most valuable segment of 3-4 minutes that feels most engaging according to module.
-                    
-                    Format: {"start_time": 30, "end_time": 120, "reason": "Explains core concept"}"""),
-                    ("human", f"""Module: {module.get('title', 'Untitled')}
-                    
-                    Transcript: {transcript}
-                    
-                    Please identify the most important teaching segment.""")
-                ])
-                
-                chain = timeline_prompt | self.llm | JsonOutputParser()
-                try:
-                    segment = chain.invoke({})
-                    start_time = segment.get('start_time', 0)
-                    end_time = segment.get('end_time', 30)
-                    
-                    # Create clip using moviepy
-                    try:
-                        video = VideoFileClip(video_path)
-                        clip = video.subclip(start_time, end_time)
-                        module_clips.append(clip)
-                        video.close()
-                    except Exception as e:
-                        print(f"Error processing video clip: {e}")
-                        continue
-                
-                except Exception as e:
-                    print(f"Error processing transcript: {e}")
-                    continue
-            
-            # Concatenate all clips for this module
-            if module_clips:
-                try:
-                    final_video = concatenate_videoclips(module_clips)
-                    output_path = os.path.join(config.VIDEO_OUTPUT_DIR, f"{module_title}_highlights.mp4")
-                    final_video.write_videofile(output_path, codec='libx264', audio_codec='aac')
-                    
-                    # Close clips to free memory
-                    for clip in module_clips:
-                        clip.close()
-                    final_video.close()
-                    
-                    processed_video_paths.append(output_path)
-                    print(f"Created highlight video: {output_path}")
-                    
-                except Exception as e:
-                    print(f"Error creating final video: {e}")
+        class StartEndOutput(BaseModel):
+            start_time: int = Field(description="Start of video in seconds")
+            end_time: int = Field(description="End of video in seconds")
+
+        class ClipOutput(BaseModel):
+            output: List[StartEndOutput] = Field(description="List of segments of start_time and end_time")
         
-        return processed_video_paths
+        structured_llm = self.llm.with_structured_output(StartEndOutput)
+
+        chain = timeline_prompt | structured_llm
+        output_path = ""
+        try:
+            segment: StartEndOutput = chain.invoke({})
+            print("segments", segment)
+            # Extract video clips based on identified segments
+            # for i, segment in enumerate(segments.output):
+            start_time = segment.start_time
+            end_time = segment.end_time
+            
+            # Create clip using moviepy
+            try:
+                video = VideoFileClip(video_path)
+                clipped = video.subclip(start_time, end_time)
+                output_path = os.path.join("./clipped_videos", f"{module_name}_highlights.mp4")
+                # Write the result
+                clipped.write_videofile(output_path, codec="libx264", audio_codec="aac")
+            except Exception as e:
+                print(f"Error processing video clip: {e}")
+        
+        except Exception as e:
+            print(f"Error processing transcript: {e}")
+        
+        return output_path

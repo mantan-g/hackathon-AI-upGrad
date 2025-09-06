@@ -40,7 +40,7 @@ def fetch_and_clean_transcript(youtube_url: str) -> str:
             continue
         start_time = max(seg.start, prev_end)
         end_time = start_time + seg.duration
-        formatted_lines.append(f"[{format_time(start_time)} → {format_time(end_time)}] {text}")
+        formatted_lines.append(f"[{start_time:.2f} → {end_time:.2f}] {text}")
         prev_end = end_time
 
     formatted_text = "\n".join(formatted_lines)
