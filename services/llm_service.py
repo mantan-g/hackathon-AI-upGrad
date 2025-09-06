@@ -35,7 +35,7 @@ class LLMService:
 
 
 
-    def generate_article(self, course_id, module_id) -> List[str]:
+    def generate_article(self, assets) -> List[str]:
         # assets = self._get_assets(course_id, module_id)
         
         # if not assets:
@@ -45,125 +45,102 @@ class LLMService:
         # Prepare assets context for article generation
         assets_context = ""
         # for asset in assets:
-        assets_context += f"""
-NestJS is a progressive Node.js framework for building efficient, reliable, and scalable server-side applications. It is built with TypeScript and combines elements of Object-Oriented Programming (OOP), Functional Programming (FP), and Functional Reactive Programming (FRP).
-Here are some key aspects of NestJS:
-
-    Architectural Inspiration:
-    NestJS is heavily inspired by Angular's modular architecture, promoting a structured and organized approach to application development. It utilizes concepts like modules, controllers, providers (services), and dependency injection.
-    TypeScript-First:
-    Embracing TypeScript provides strong typing, which enhances code quality, maintainability, and developer productivity, especially in large-scale applications.
-    Built on Top of HTTP Frameworks:
-    NestJS leverages robust HTTP server frameworks like Express by default, with the option to use Fastify for improved performance. It adds a layer of abstraction and structure on top of these foundations.
-    Focus on Scalability and Maintainability:
-    The framework's design principles, including modularity and well-defined architectural patterns, make it suitable for building applications that can easily scale and be maintained over time.
-    Support for Microservices:
-    NestJS provides native support for building microservices, offering features and patterns for inter-service communication and management.
-    Enterprise-Ready:
-    Its structured approach, strong typing, and support for various architectural patterns make NestJS a popular choice for enterprise-level applications, used by companies like Adidas and Roche.
+        for asset in assets:
+            assets_context += f"""
+Title: {asset.get('title', 'N/A')}
+Description: {asset.get('description', 'N/A')}
 ---
 """
         
         # Generate article using LLM
         article_prompt = ChatPromptTemplate.from_messages([
             ("system", """You are an expert technical writer. Create a comprehensive, 
-            engaging 250-word article about the given module using the provided assets as reference.
-            
-            The article should:
-            - Be exactly around 250 words
-            - Be informative and well-structured
-            - Include key concepts and takeaways
-            - Be suitable for learners
-            - Have a clear introduction, body, and conclusion"""),
-            ("human", f"""Module: NestJs course
-            Description: NestJs Course
-            
-            Assets Information:
-            {assets_context}
-            
-            Please write a 250-word article about this module.""")
+engaging 250-word article about the given module using the provided assets as reference.
+
+The article should:
+- Be exactly around 250 words
+- Be informative and well-structured
+- Include key concepts and takeaways
+- Be suitable for learners
+- Have a clear introduction, body, and conclusion"""),
+("human", """Module: NestJs course
+Description: NestJs Course
+
+Assets Information:
+{assets_context}
+
+Please write a 250-word article about this module.""")
         ])
         
         chain = article_prompt | self.llm
-        article_content = chain.invoke({})
-        return article_content
-        # Save article to MongoDB
-        article_doc = {
-            "module_id": module_id,
-            "module_title": module.get('title', 'Untitled'),
-            "content": article_content.content,
-            "word_count": len(article_content.content.split()),
-            "created_at": datetime.utcnow(),
-            "assets_used": [str(asset['_id']) for asset in assets]
-        }
-        
-        result = self.articles_collection.insert_one(article_doc)
-        article_ids.append(str(result.inserted_id))
-        
-        print(f"Generated article for module: {module.get('title', 'Untitled')}")
-        
-        return article_ids
+        article_content = chain.invoke({"assets_context": assets_context})
+        return article_content.content
     
 
 
-    def process_video(self, yt_url, gdrive_url, module_name) -> List[str]:
-        print("gdrive_url", gdrive_url)
-        video_path = download_from_gdrive(gdrive_url, os.path.join(self.download_video_path, f"{module_name}.mp4"))
-        transcript = fetch_and_clean_transcript(yt_url)
-        print("transcript", transcript)
-        print("video_path", video_path)
-        if not video_path:
-            print("Video not downloaded")
-            return
-        module_clips = []
-        # Extract relevant timelines using LLM
-        # Extract relevant timelines using LLM
-        timeline_prompt = ChatPromptTemplate.from_messages([
-            ("system", """You are an expert video editor. Analyze the transcript and identify 
-the most important segment of less than 300 seconds that teach the core concepts of the module.
+    def process_video(self, video_assets) -> List[str]:
+        for video_asset in video_assets:
+            yt_url = video_asset["youtubeUrl"]
+            gdrive_url = video_asset["gDriveUrl"]
+            module_name = video_asset["title"]
+            transcript = video_asset["transcript"]
+            print("gdrive_url", gdrive_url)
+            video_path = download_from_gdrive(gdrive_url, os.path.join(self.download_video_path, f"{module_name}.mp4"))
+            print("video_path", video_path)
+            if not video_path:
+                print("Video not downloaded")
+                return
+            module_clips = []
+            # Extract relevant timelines using LLM
+            # Extract relevant timelines using LLM
+            timeline_prompt = ChatPromptTemplate.from_messages([
+                ("system", """You are an expert video editor. Analyze the transcript and identify 
+    the most important segment of less than 300 seconds that teach the core concepts of the module.
 
-Return a JSON array of segments with start_time, end_time (in seconds), and reason.
-Select only 1 most valuable segment that covers the module."""),
-("human", f"""Module: {module_name}
+    Return a JSON array of segments with start_time, end_time (in seconds), and reason.
+    Select only 1 most valuable segment that covers the module."""),
+    ("human", """Module: {module_name}
 
-Transcript: {transcript}
+    Transcript: {transcript}
 
-Please identify the most important teaching segments.""")
-        ])
-        
-        class StartEndOutput(BaseModel):
-            start_time: int = Field(description="Start of video in seconds")
-            end_time: int = Field(description="End of video in seconds")
-
-        class ClipOutput(BaseModel):
-            output: List[StartEndOutput] = Field(description="List of segments of start_time and end_time")
-        
-        structured_llm = self.llm.with_structured_output(StartEndOutput)
-
-        chain = timeline_prompt | structured_llm
-        output_path = ""
-        try:
-            segment: StartEndOutput = chain.invoke({})
-            print("segments", segment)
-            # Extract video clips based on identified segments
-            # for i, segment in enumerate(segments.output):
-            start_time = segment.start_time
-            end_time = segment.end_time
+    Please identify the most important teaching segments.""")
+            ])
             
-            # Create clip using moviepy
+            class StartEndOutput(BaseModel):
+                start_time: int = Field(description="Start of video in seconds")
+                end_time: int = Field(description="End of video in seconds")
+
+            class ClipOutput(BaseModel):
+                output: List[StartEndOutput] = Field(description="List of segments of start_time and end_time")
+            
+            structured_llm = self.llm.with_structured_output(StartEndOutput)
+
+            chain = timeline_prompt | structured_llm
+            output_path = ""
             try:
-                video = VideoFileClip(video_path)
-                clipped = video.subclip(start_time, end_time)
-                output_path = os.path.join("./clipped_videos", f"{module_name}_highlights.mp4")
-                # Write the result
-                clipped.write_videofile(output_path, codec="libx264", audio_codec="aac")
+                segment: StartEndOutput = chain.invoke({"module_name": module_name, "transcript": transcript})
+                print("segments", segment)
+                # Extract video clips based on identified segments
+                # for i, segment in enumerate(segments.output):
+                start_time = segment.start_time
+                end_time = segment.end_time
+                
+                # Create clip using moviepy
+                try:
+                    video = VideoFileClip(video_path)
+                    if end_time > video.duration:
+                        end_time = video.duration - 0.5
+                    clipped = video.subclip(start_time, end_time)
+                    output_path = os.path.join("./clipped_videos", f"{module_name}_highlights.mp4")
+                    # Write the result
+                    clipped.write_videofile(output_path, codec="libx264", audio_codec="aac")
+                except Exception as e:
+                    print(f"Error processing video clip: {e}")
+            
             except Exception as e:
-                print(f"Error processing video clip: {e}")
-        
-        except Exception as e:
-            print(f"Error processing transcript: {e}")
-        
-        return output_path
+                print(f"Error processing transcript: {e}")
+            
+            return output_path
     
 
 
@@ -188,7 +165,7 @@ Please identify the most important teaching segments.""")
         quiz_prompt = ChatPromptTemplate.from_messages([
             ("system", """You are an expert quiz creator. Create a comprehensive quiz with 5 questions 
             based on the provided content. It should contain multiple choice questions (4 options each) along with answer"""),
-            ("human", f"Create a quiz based on this content:\n\n{quiz_content}")
+            ("human", "Create a quiz based on this content:\n\n{quiz_content}")
         ])
 
         class Option(BaseModel):
@@ -207,7 +184,7 @@ Please identify the most important teaching segments.""")
 
         structured_llm = self.llm.with_structured_output(Quizzes)
         chain = quiz_prompt | structured_llm
-        quiz_data = chain.invoke({})
+        quiz_data = chain.invoke({"quiz_content": quiz_content})
         
         return self._object_to_dict(quiz_data)
     
@@ -225,6 +202,28 @@ Please identify the most important teaching segments.""")
                 result[key] = value
         return result
 
+
+    def create_module_preview(self, module_id):
+        module = []
+        for item in self.db.find_one("programs", {"courses.module._id": ObjectId(module_id)})["courses"]:
+            module = [*module, *[i for i in item["module"] if i["_id"] == ObjectId(module_id)]]
+        module = module[0]
+        print(module)
+        assets = module["asset"]
+        module_name = module["title"]
+        text_assets = []
+        video_assets = []
+        for asset in assets:
+            if asset["type"] == "text":
+                text_assets.append(asset)
+            elif asset["type"] == "video":
+                video_assets.append({**asset, "transcript": fetch_and_clean_transcript(asset["youtubeUrl"])})
+
+        preview_article = self.generate_article(text_assets)
+        output_path_clipped_video = self.process_video(video_assets)
+        quiz = self.generate_quiz(module_name, [preview_article], [i["transcript"] for i in video_assets])
+
+        return preview_article, output_path_clipped_video, quiz
 
 
 
